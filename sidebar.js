@@ -183,15 +183,18 @@ let genAI, chat, basecampMessages;
 
 const BASECAMP_MODELS = [
   'gemini-3.8-flash',
-  'gemini-3.7-flash',
+  'claude-sonnet-5',
+  'claude-sonnet-5-5',
+  'claude-sonnet-4-6',
   'claude-opus-5-5',
-  'claude-fable-5-1',
   'claude-opus-5',
-  'deepseek-v4.1-flash',
-  'glm-5.3-flash',
-  'glm-5.3',
-  'glm-5.2',
-  'qwen-3.8-max',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-fable-5-1',
+  'claude-haiku-4-5-20251001',
+  'gpt-6-luna',
+  'gpt-6.1-sol',
 ];
 
 function updateActiveModelDisplay() {
