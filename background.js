@@ -29,12 +29,13 @@ chrome.webNavigation.onCompleted.addListener(({ tabId }) => updateBadge(tabId));
 async function updateBadge(tabId) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id !== tabId) return;
+  if (!tab?.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('about:')) return;
   chrome.action.setBadgeText({ text: '', tabId });
   chrome.action.setBadgeBackgroundColor({ color: '#2563eb' });
   const fromOrigins = await getAllFrameOrigins(tab.id);
   const message = { action: 'LIST_TOOLS', fromOrigins };
   chrome.tabs.sendMessage(tabId, message, { frameId: 0 }).catch(({ message }) => {
-    chrome.runtime.sendMessage({ message, tabId });
+    chrome.runtime.sendMessage({ message, tabId }).catch(() => {});
   });
 }
 
