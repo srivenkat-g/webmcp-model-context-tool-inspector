@@ -23,23 +23,48 @@ const traceBtn = document.getElementById('traceBtn');
 const resetBtn = document.getElementById('resetBtn');
 const apiKeyBtn = document.getElementById('apiKeyBtn');
 const promptResults = document.getElementById('promptResults');
+const auditRecipeBtn = document.getElementById('auditRecipeBtn');
+const modelSelect = document.getElementById('modelSelect');
 const advancedSection = document.getElementById('advancedSection');
 const micBtn = document.getElementById('micBtn');
 const suggestUserPromptCheckbox = document.getElementById('suggestUserPromptCheckbox');
 
-// First, request list of tools from content script living in top-level frame.
-(async () => {
+// Request list of tools from content script living in top-level frame.
+async function requestToolsFromActiveTab() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
+      statusDiv.textContent = 'Navigate to a webpage (e.g. RSC) to inspect WebMCP tools.';
+      statusDiv.hidden = false;
+      copyToClipboard.hidden = true;
+      return;
+    }
     const fromOrigins = await getAllFrameOrigins(tab.id);
-    await chrome.tabs.sendMessage(tab.id, { action: 'LIST_TOOLS', fromOrigins }, { frameId: 0 });
+    try {
+      await chrome.tabs.sendMessage(tab.id, { action: 'LIST_TOOLS', fromOrigins }, { frameId: 0 });
+    } catch {
+      // Content script may not be injected yet; inject dynamically:
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content.js'],
+        });
+        await chrome.tabs.sendMessage(tab.id, { action: 'LIST_TOOLS', fromOrigins }, { frameId: 0 });
+      } catch {}
+    }
   } catch (error) {
-    const statusDiv = document.getElementById('status');
-    statusDiv.textContent = error;
+    statusDiv.textContent = 'Please refresh the active web tab to connect the inspector.';
     statusDiv.hidden = false;
     copyToClipboard.hidden = true;
   }
-})();
+}
+
+requestToolsFromActiveTab();
+
+chrome.tabs.onActivated.addListener(() => requestToolsFromActiveTab());
+chrome.tabs.onUpdated.addListener((_, changeInfo) => {
+  if (changeInfo.status === 'complete') requestToolsFromActiveTab();
+});
 
 let currentTools = [];
 
@@ -66,7 +91,7 @@ chrome.runtime.onMessage.addListener(async ({ message, tools, url, type, tabId }
 
   const haveNewTools = JSON.stringify(currentTools) !== JSON.stringify(tools);
 
-  currentTools = tools;
+  currentTools = tools || [];
   if (haveNewTools) updateLiveTools();
 
   if (!tools || tools.length === 0) {
@@ -126,7 +151,7 @@ tbody.ondblclick = () => {
 };
 
 copyAsScriptToolConfig.onclick = async () => {
-  const text = currentTools
+  const text = (currentTools || [])
     .map((tool) => {
       return `\
 script_tools {
@@ -140,7 +165,7 @@ script_tools {
 };
 
 copyAsJSON.onclick = async () => {
-  const tools = currentTools.map((tool) => {
+  const tools = (currentTools || []).map((tool) => {
     return {
       name: tool.name,
       description: tool.description,
@@ -154,7 +179,32 @@ copyAsJSON.onclick = async () => {
 
 // Interact with the page
 
-let genAI, chat;
+let genAI, chat, basecampMessages;
+
+const BASECAMP_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-3.7-flash',
+  'claude-opus-5-5',
+  'claude-fable-5-1',
+  'claude-opus-5',
+  'deepseek-v4.1-flash',
+  'glm-5.3-flash',
+  'glm-5.3',
+  'glm-5.2',
+  'qwen-3.8-max',
+];
+
+function updateActiveModelDisplay() {
+  if (modelSelect) {
+    const isBasecamp = (localStorage.provider || 'basecamp') === 'basecamp';
+    if (isBasecamp) {
+      modelSelect.style.display = 'inline-block';
+      modelSelect.value = localStorage.basecampModel || 'gemini-3.8-flash';
+    } else {
+      modelSelect.style.display = 'none';
+    }
+  }
+}
 
 async function initGenAI() {
   let env;
@@ -162,7 +212,18 @@ async function initGenAI() {
     // Try load .env.json if present.
     env = (await import('./.env.json', { with: { type: 'json' } })).default;
   } catch {}
+
+  if (env?.basecampApiKey) localStorage.basecampApiKey ??= env.basecampApiKey;
   if (env?.apiKey) localStorage.apiKey ??= env.apiKey;
+  if (env?.provider) localStorage.provider ??= env.provider;
+  if (env?.basecampModel) localStorage.basecampModel ??= env.basecampModel;
+
+  localStorage.provider ??= (localStorage.basecampApiKey || !localStorage.apiKey) ? 'basecamp' : 'gemini';
+  if (!BASECAMP_MODELS.includes(localStorage.basecampModel)) {
+    localStorage.basecampModel = 'gemini-3.8-flash';
+  }
+  localStorage.basecampUrl ??= 'https://basecamp.stark.rubrik.com/v1';
+
   if (localStorage.model === 'gemini-2.5-flash') {
     localStorage.model = 'gemini-3-flash-preview';
   }
@@ -170,20 +231,69 @@ async function initGenAI() {
     localStorage.model = 'gemini-3.1-flash-lite';
   }
   localStorage.model ??= env?.model || 'gemini-3.6-flash';
-  genAI = localStorage.apiKey ? new GoogleGenAI({ apiKey: localStorage.apiKey }) : undefined;
-  promptBtn.disabled = !localStorage.apiKey;
-  resetBtn.disabled = !localStorage.apiKey;
-  apiKeyBtn.textContent = localStorage.apiKey ? 'Update Gemini API key' : 'Set Gemini API key';
+
+  const isBasecamp = localStorage.provider === 'basecamp';
+  const hasKey = isBasecamp
+    ? Boolean(localStorage.basecampApiKey || localStorage.apiKey)
+    : Boolean(localStorage.apiKey);
+
+  if (!isBasecamp && localStorage.apiKey) {
+    genAI = new GoogleGenAI({ apiKey: localStorage.apiKey });
+  } else {
+    genAI = undefined;
+  }
+
+  promptBtn.disabled = !hasKey;
+  if (auditRecipeBtn) auditRecipeBtn.disabled = !hasKey;
+  resetBtn.disabled = !hasKey;
+
+  apiKeyBtn.textContent = hasKey
+    ? (isBasecamp ? 'Update Basecamp Key' : 'Update Gemini Key')
+    : (isBasecamp ? 'Set Basecamp API Key' : 'Set Gemini API Key');
 
   suggestUserPromptCheckbox.checked = localStorage.suggestUserPrompt !== 'false';
+  updateActiveModelDisplay();
 }
 await initGenAI();
+
+document.querySelectorAll('input[name="provider"]').forEach((radio) => {
+  radio.checked = radio.value === (localStorage.provider || 'basecamp');
+  radio.onclick = async () => {
+    localStorage.provider = radio.value;
+    chat = undefined;
+    basecampMessages = undefined;
+    await initGenAI();
+    updateActiveModelDisplay();
+    advancedSection.hidePopover();
+  };
+});
+
+document.querySelectorAll('input[name="basecampModel"]').forEach((radio) => {
+  radio.checked = radio.value === (localStorage.basecampModel || 'gemini-3.8-flash');
+  radio.onclick = () => {
+    localStorage.basecampModel = radio.value;
+    basecampMessages = undefined;
+    updateActiveModelDisplay();
+    advancedSection.hidePopover();
+  };
+});
+
+if (modelSelect) {
+  modelSelect.onchange = () => {
+    localStorage.basecampModel = modelSelect.value;
+    basecampMessages = undefined;
+    document.querySelectorAll('input[name="basecampModel"]').forEach((radio) => {
+      radio.checked = radio.value === modelSelect.value;
+    });
+  };
+}
 
 document.querySelectorAll('input[name="model"]').forEach((radio) => {
   radio.checked = radio.value === localStorage.model;
   radio.onclick = () => {
     localStorage.model = radio.value;
     chat = undefined;
+    updateActiveModelDisplay();
     advancedSection.hidePopover();
   };
 });
@@ -196,9 +306,55 @@ suggestUserPromptCheckbox.onchange = () => {
 
 async function suggestUserPrompt() {
   if (localStorage.suggestUserPrompt === 'false') return;
-  if (currentTools.length == 0 || !genAI || userPromptText.value !== lastSuggestedUserPrompt)
-    return;
+  if (currentTools.length == 0 || userPromptText.value !== lastSuggestedUserPrompt) return;
+
+  const isBasecamp = (localStorage.provider || 'basecamp') === 'basecamp';
+  const key = isBasecamp ? (localStorage.basecampApiKey || localStorage.apiKey) : localStorage.apiKey;
+  if (!key) return;
+
   const userPromptId = ++userPromptPendingId;
+
+  if (isBasecamp) {
+    const model = localStorage.basecampModel || 'gemini-3.8-flash';
+    const baseUrl = localStorage.basecampUrl || 'https://basecamp.stark.rubrik.com/v1';
+    try {
+      const resp = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: 'system',
+              content: `Today's date is: ${getFormattedDate()}. Generate one natural user query for the tools below. Output query text only.`,
+            },
+            {
+              role: 'user',
+              content: `Tools: ${JSON.stringify(currentTools)}`,
+            },
+          ],
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        const text = data.choices?.[0]?.message?.content?.trim();
+        if (text && userPromptId === userPromptPendingId && userPromptText.value === lastSuggestedUserPrompt) {
+          lastSuggestedUserPrompt = text;
+          userPromptText.value = '';
+          for (const chunk of text) {
+            await new Promise((r) => requestAnimationFrame(r));
+            userPromptText.value += chunk;
+          }
+        }
+      }
+    } catch {}
+    return;
+  }
+
+  if (!genAI) return;
   const response = await genAI.models.generateContent({
     model: localStorage.model,
     contents: [
@@ -235,24 +391,136 @@ userPromptText.onkeydown = (event) => {
 
 promptBtn.onclick = async () => {
   try {
-    await promptAI();
+    const isBasecamp = (localStorage.provider || 'basecamp') === 'basecamp';
+    if (isBasecamp) {
+      await promptBasecampAI();
+    } else {
+      await promptAI();
+    }
   } catch (error) {
     trace.push({ error });
-    logPrompt(`⚠️ Error: "${error}"`);
+    logPrompt(`⚠️ Error: "${error.message || error}"`);
   }
 };
 
 let trace = [];
 
+async function promptBasecampAI() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const model = localStorage.basecampModel || 'gemini-3.8-flash';
+  const apiKey = localStorage.basecampApiKey || localStorage.apiKey;
+  const baseUrl = localStorage.basecampUrl || 'https://basecamp.stark.rubrik.com/v1';
+
+  const message = userPromptText.value.trim();
+  if (!message) return;
+  userPromptText.value = '';
+  lastSuggestedUserPrompt = '';
+  logPrompt(`User prompt: "${message}"`);
+
+  basecampMessages ??= [
+    {
+      role: 'system',
+      content: getSystemInstructionText(),
+    },
+  ];
+
+  basecampMessages.push({ role: 'user', content: message });
+
+  const formattedTools = (currentTools || []).map((tool) => ({
+    type: 'function',
+    function: {
+      name: `_${tool.frameId}_${tool.name}`,
+      description: tool.description || '',
+      parameters: tool.inputSchema
+        ? (typeof tool.inputSchema === 'string' ? JSON.parse(tool.inputSchema) : tool.inputSchema)
+        : { type: 'object', properties: {} },
+    },
+  }));
+
+  let finalResponseGiven = false;
+
+  while (!finalResponseGiven) {
+    const requestPayload = {
+      model,
+      messages: basecampMessages,
+    };
+    if (formattedTools.length > 0) {
+      requestPayload.tools = formattedTools;
+    }
+    trace.push({ basecampRequest: requestPayload });
+
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestPayload),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Basecamp returned status ${response.status}: ${errText}`);
+    }
+
+    const data = await response.json();
+    trace.push({ basecampResponse: data });
+
+    const choice = data.choices?.[0];
+    const assistantMessage = choice?.message;
+
+    if (!assistantMessage) {
+      logPrompt(`⚠️ Basecamp response has no message: ${JSON.stringify(data)}`);
+      break;
+    }
+
+    basecampMessages.push(assistantMessage);
+
+    const toolCalls = assistantMessage.tool_calls || [];
+    if (toolCalls.length === 0) {
+      if (assistantMessage.content) {
+        renderAiResult(assistantMessage.content.trim());
+      }
+      finalResponseGiven = true;
+    } else {
+      for (const toolCall of toolCalls) {
+        const toolName = toolCall.function.name;
+        let [frameId, name] = toolName.split(/_(.*)/s)[1].split(/_(.*)/s);
+        frameId = parseInt(frameId);
+        const inputArgs = toolCall.function.arguments;
+        logPrompt(`AI calling tool "${name}" with ${inputArgs}`);
+        try {
+          const result = await executeTool(tab.id, name, inputArgs, frameId);
+          logPrompt(`Tool "${name}" result: ${result}`);
+          basecampMessages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: typeof result === 'string' ? result : JSON.stringify(result),
+          });
+        } catch (e) {
+          logPrompt(`⚠️ Error executing tool "${name}": ${e.message}`);
+          basecampMessages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({ error: e.message }),
+          });
+        }
+      }
+    }
+  }
+}
+
 async function promptAI() {
+  const message = userPromptText.value.trim();
+  if (!message) return;
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
   chat ??= genAI.chats.create({ model: localStorage.model });
 
-  const message = userPromptText.value;
   userPromptText.value = '';
   lastSuggestedUserPrompt = '';
-  promptResults.textContent += `User prompt: "${message}"\n`;
+  logPrompt(`User prompt: "${message}"`);
   const sendMessageParams = { message, config: getConfig() };
   trace.push({ userPrompt: sendMessageParams });
   let currentResult = await chat.sendMessage(sendMessageParams);
@@ -267,7 +535,7 @@ async function promptAI() {
       if (!response.text) {
         logPrompt(`⚠️ AI response has no text: ${JSON.stringify(response.candidates)}\n`);
       } else {
-        logPrompt(`AI result: ${response.text?.trim()}\n`);
+        renderAiResult(response.text?.trim());
       }
       finalResponseGiven = true;
     } else {
@@ -298,17 +566,36 @@ async function promptAI() {
 
 resetBtn.onclick = () => {
   chat = undefined;
+  basecampMessages = undefined;
   trace = [];
   userPromptText.value = '';
   lastSuggestedUserPrompt = '';
-  promptResults.textContent = '';
+  promptResults.innerHTML = '';
   suggestUserPrompt();
 };
 
+if (auditRecipeBtn) {
+  auditRecipeBtn.onclick = () => {
+    userPromptText.value =
+      'Audit our Salesforce protection on this page: check active vs paused alerts, identify unmonitored objects, and generate a standalone Python script using standard libraries to run this audit monthly.';
+    promptBtn.click();
+  };
+}
+
 apiKeyBtn.onclick = async () => {
-  const apiKey = prompt('Enter Gemini API key', localStorage.apiKey);
-  if (apiKey == null) return;
-  localStorage.apiKey = apiKey;
+  const isBasecamp = (localStorage.provider || 'basecamp') === 'basecamp';
+  if (isBasecamp) {
+    const key = prompt(
+      'Enter Rubrik Basecamp (LiteLLM) API Key:\n(Generate at https://basecamp-self-serve.stark.rubrik.com/)',
+      localStorage.basecampApiKey || localStorage.apiKey || '',
+    );
+    if (key == null) return;
+    localStorage.basecampApiKey = key.trim();
+  } else {
+    const apiKey = prompt('Enter Google Gemini API key', localStorage.apiKey);
+    if (apiKey == null) return;
+    localStorage.apiKey = apiKey.trim();
+  }
   await initGenAI();
   suggestUserPrompt();
 };
@@ -411,8 +698,132 @@ initGeminiLive({
 // Utils
 
 function logPrompt(text) {
-  promptResults.textContent += `${text}\n`;
+  const textNode = document.createTextNode(`${text}\n`);
+  promptResults.appendChild(textNode);
   promptResults.scrollTop = promptResults.scrollHeight;
+}
+
+function renderAiResult(text) {
+  if (!text) return;
+  logPrompt(`AI result: ${text}\n`);
+
+  // Detect code blocks: ```[lang][:filename]\n[code]```
+  const codeBlockRegex = /```(?:([a-zA-Z0-9_-]+)(?:\s*:\s*([^\n\r]+))?)?\n([\s\S]*?)```/g;
+  let match;
+  while ((match = codeBlockRegex.exec(text)) !== null) {
+    const rawLang = (match[1] || '').toLowerCase();
+    const explicitFilename = match[2]?.trim();
+    const code = match[3].trim();
+
+    const lang = rawLang || (code.includes('import ') || code.includes('def ') ? 'python' : 'script');
+    let filename = explicitFilename;
+    if (!filename) {
+      const commentMatch = code.match(/^(?:#|\/\/|\/\*)\s*([\w.-]+\.(?:py|sh|js|ts|json|yml|yaml))\b/m);
+      if (commentMatch) {
+        filename = commentMatch[1];
+      } else if (lang === 'python' || lang === 'py') {
+        filename = 'salesforce_monthly_audit.py';
+      } else if (lang === 'sh' || lang === 'bash') {
+        filename = 'run_audit.sh';
+      } else if (lang === 'json') {
+        filename = 'audit_report.json';
+      } else {
+        filename = 'automation_script.py';
+      }
+    }
+
+    createScriptDeliveryCard(filename, lang, code);
+  }
+}
+
+function createScriptDeliveryCard(filename, lang, code) {
+  const card = document.createElement('div');
+  card.className = 'script-delivery-card';
+
+  const isPython = lang === 'python' || lang === 'py' || filename.endsWith('.py');
+  const badgeText = isPython ? 'Python 3 • Zero Dependencies' : `${lang.toUpperCase()} Script`;
+
+  card.innerHTML = `
+    <div class="script-delivery-header">
+      <div class="script-delivery-title">
+        <span>⚡</span>
+        <span>${escapeHtml(filename)}</span>
+      </div>
+      <span class="script-delivery-badge">${badgeText}</span>
+    </div>
+    <div class="script-delivery-actions">
+      <button class="script-delivery-btn primary download-btn">⬇️ Download ${escapeHtml(filename)}</button>
+      <button class="script-delivery-btn secondary copy-btn">📋 Copy Code</button>
+      <button class="script-delivery-btn secondary toggle-btn">👁️ View Code</button>
+    </div>
+    <pre class="script-delivery-code" style="display: none;">${escapeHtml(code)}</pre>
+    <div class="script-delivery-runbook">
+      <strong>Run without WebMCP / Extension:</strong><br>
+      <code>export RUBRIK_BASE_URL="https://your-org.my.rubrik.com"</code><br>
+      <code>export RUBRIK_API_TOKEN="&lt;your-service-account-token&gt;"</code><br>
+      <code>python3 ${escapeHtml(filename)}</code>
+    </div>
+  `;
+
+  const downloadBtn = card.querySelector('.download-btn');
+  downloadBtn.onclick = (e) => {
+    e.stopPropagation();
+    downloadFile(filename, code, isPython ? 'text/x-python' : 'text/plain');
+  };
+
+  const copyBtn = card.querySelector('.copy-btn');
+  copyBtn.onclick = async (e) => {
+    e.stopPropagation();
+    await navigator.clipboard.writeText(code);
+    copyBtn.textContent = '✓ Copied!';
+    setTimeout(() => {
+      copyBtn.textContent = '📋 Copy Code';
+    }, 2000);
+  };
+
+  const toggleBtn = card.querySelector('.toggle-btn');
+  const codePre = card.querySelector('.script-delivery-code');
+  toggleBtn.onclick = (e) => {
+    e.stopPropagation();
+    const isHidden = codePre.style.display === 'none';
+    codePre.style.display = isHidden ? 'block' : 'none';
+    toggleBtn.textContent = isHidden ? '🙈 Hide Code' : '👁️ View Code';
+  };
+
+  promptResults.appendChild(card);
+  promptResults.scrollTop = promptResults.scrollHeight;
+}
+
+function downloadFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function getSystemInstructionText() {
+  return [
+    'You are an assistant embedded in a browser tab for Rubrik Security Cloud.',
+    'User prompts typically refer to the current tab unless stated otherwise.',
+    'Use the provided tools to query page content when you need it.',
+    `Today's date is: ${getFormattedDate()}`,
+    'CRITICAL RULE: Whenever the user provides a relative date (e.g., "next Monday", "tomorrow", "in 3 days"),  you must calculate the exact calendar date based on today\'s date.',
+    'CRITICAL RULE: Do not try to use other tools than the available ones.',
+    'AUTOMATION & SCRIPT DELIVERY RULE: When asked to audit, automate, or generate a script: first use the page tools to query live data and identify status or gaps. Then output a complete, standalone, production-ready Python script inside a ```python code block. The script MUST use only standard libraries (urllib.request, json, os, sys, datetime) with zero external pip dependencies. It should read credentials from RUBRIK_BASE_URL and RUBRIK_API_TOKEN environment variables and print a clean summary report.',
+  ].join('\n');
 }
 
 function getFormattedDate() {
@@ -427,24 +838,26 @@ function getFormattedDate() {
 
 function getConfig() {
   const systemInstruction = [
-    'You are an assistant embedded in a browser tab.',
+    'You are an assistant embedded in a browser tab for Rubrik Security Cloud.',
     'User prompts typically refer to the current tab unless stated otherwise.',
     'Use the provided tools to query page content when you need it.',
     `Today's date is: ${getFormattedDate()}`,
     'CRITICAL RULE: Whenever the user provides a relative date (e.g., "next Monday", "tomorrow", "in 3 days"),  you must calculate the exact calendar date based on today\'s date.',
     'CRITICAL RULE: Do not try to use other tools than the available ones.',
+    'AUTOMATION & SCRIPT DELIVERY RULE: When asked to audit, automate, or generate a script: first use the page tools to query live data and identify status or gaps. Then output a complete, standalone, production-ready Python script inside a ```python code block. The script MUST use only standard libraries (urllib.request, json, os, sys, datetime) with zero external pip dependencies. It should read credentials from RUBRIK_BASE_URL and RUBRIK_API_TOKEN environment variables and print a clean summary report.',
   ];
 
-  const functionDeclarations = currentTools.map((tool) => {
+  const functionDeclarations = (currentTools || []).map((tool) => {
     return {
       name: `_${tool.frameId}_${tool.name}`,
       description: tool.description,
       parametersJsonSchema: tool.inputSchema
-        ? JSON.parse(tool.inputSchema)
+        ? (typeof tool.inputSchema === 'string' ? JSON.parse(tool.inputSchema) : tool.inputSchema)
         : { type: 'object', properties: {} },
     };
   });
-  return { systemInstruction, tools: [{ functionDeclarations }] };
+  const tools = functionDeclarations.length > 0 ? [{ functionDeclarations }] : [];
+  return { systemInstruction, tools };
 }
 
 function generateTemplateFromSchema(schema) {

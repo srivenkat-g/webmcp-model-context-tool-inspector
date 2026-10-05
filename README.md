@@ -31,6 +31,14 @@ Install the extension directly via the [Chrome Web Store](https://chromewebstore
 5.  **Load Unpacked:**
     Click the **Load unpacked** button that appears in the top left. Select the directory containing `manifest.json` (the folder where you saved the files).
 
+## Enhanced Features in this Fork
+
+- **Rubrik Basecamp (LiteLLM) Support:** Seamlessly call Rubrik-approved internal models (`gemini-3.8-flash` [default], `gemini-3.7-flash`, `claude-opus-5-5`, `claude-fable-5-1`, `deepseek-v4.1-flash`, `glm-5.3-flash`, `glm-5.3`, `glm-5.2`, `qwen-3.8-max`, etc.) via Basecamp gateway with your internal LiteLLM API key.
+- **On-Screen Model Selector:** Directly switch active models from the dropdown header above the prompt box.
+- **Interactive Script Delivery:** Detects generated automation scripts in conversation and renders an interactive card with **1-click Download**, **Copy Code**, and terminal runbook instructions.
+- **One-Click Audit & Script Trigger:** Instantly audit page protection and compile standalone automation scripts.
+- **Dynamic Connection & Reconnect:** Automatically detects tab switching, refreshes tools dynamically, and injects content scripts on demand.
+
 ## Usage
 
 1.  **Navigate to a Page:**
