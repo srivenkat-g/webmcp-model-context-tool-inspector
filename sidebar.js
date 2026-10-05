@@ -408,6 +408,35 @@ promptBtn.onclick = async () => {
 
 let trace = [];
 
+function sanitizeSchemaForVertexAi(schema) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+    return { type: 'object' };
+  }
+  const clean = { type: schema.type || 'object' };
+  if (typeof schema.description === 'string' && schema.description) {
+    clean.description = schema.description;
+  }
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    clean.enum = schema.enum;
+  }
+  if (schema.properties && typeof schema.properties === 'object') {
+    const cleanProps = {};
+    for (const [k, v] of Object.entries(schema.properties)) {
+      cleanProps[k] = sanitizeSchemaForVertexAi(v);
+    }
+    if (Object.keys(cleanProps).length > 0) {
+      clean.properties = cleanProps;
+    }
+  }
+  if (schema.items && typeof schema.items === 'object') {
+    clean.items = sanitizeSchemaForVertexAi(schema.items);
+  }
+  if (Array.isArray(schema.required) && schema.required.length > 0) {
+    clean.required = schema.required;
+  }
+  return clean;
+}
+
 async function promptBasecampAI() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const model = localStorage.basecampModel || 'gemini-3.8-flash';
@@ -429,16 +458,24 @@ async function promptBasecampAI() {
 
   basecampMessages.push({ role: 'user', content: message });
 
-  const formattedTools = (currentTools || []).map((tool) => ({
-    type: 'function',
-    function: {
-      name: `_${tool.frameId}_${tool.name}`,
-      description: tool.description || '',
-      parameters: tool.inputSchema
-        ? (typeof tool.inputSchema === 'string' ? JSON.parse(tool.inputSchema) : tool.inputSchema)
-        : { type: 'object', properties: {} },
-    },
-  }));
+  const formattedTools = (currentTools || []).map((tool) => {
+    let rawSchema = tool.inputSchema;
+    if (typeof rawSchema === 'string') {
+      try {
+        rawSchema = JSON.parse(rawSchema);
+      } catch {
+        rawSchema = {};
+      }
+    }
+    return {
+      type: 'function',
+      function: {
+        name: `_${tool.frameId}_${tool.name}`,
+        description: tool.description || '',
+        parameters: sanitizeSchemaForVertexAi(rawSchema),
+      },
+    };
+  });
 
   let finalResponseGiven = false;
 
